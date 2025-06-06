@@ -10,15 +10,23 @@ from dataclasses import dataclass, asdict
 import time
 import re
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# Ollama configuration
-OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
-OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama2:latest')
+# Gemini AI configuration
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent'
 
-print(f"🦙 Using Ollama at {OLLAMA_BASE_URL} with model {OLLAMA_MODEL}")
+if not GEMINI_API_KEY:
+    print("❌ GEMINI_API_KEY not found in environment variables!")
+    print("Please set your Gemini API key in .env file")
+else:
+    print(f"🤖 Using Gemini AI with API key: {GEMINI_API_KEY[:10]}...")
 
 client = MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
 db = client.personalized_tutor
@@ -69,82 +77,109 @@ def clean_mongo_doc(doc):
         del doc['_id']
     return doc
 
-class OllamaClient:
-    def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_MODEL):
-        self.base_url = base_url
-        self.model = model
+class GeminiClient:
+    def __init__(self, api_key: str = GEMINI_API_KEY):
+        self.api_key = api_key
+        self.base_url = GEMINI_BASE_URL
         
     def generate(self, prompt: str, max_tokens: int = 2048) -> str:
-        """Generate text using Ollama API"""
+        """Generate text using Gemini AI API"""
         try:
-            url = f"{self.base_url}/api/generate"
+            url = f"{self.base_url}?key={self.api_key}"
+            
             payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
                     "temperature": 0.7,
-                    "num_predict": max_tokens
+                    "maxOutputTokens": max_tokens,
+                    "topP": 0.8,
+                    "topK": 40
                 }
             }
             
-            print(f"🦙 Sending request to Ollama: {url}")
-            response = requests.post(url, json=payload, timeout=60)
+            print(f"🤖 Sending request to Gemini AI...")
+            response = requests.post(
+                url, 
+                json=payload, 
+                headers={'Content-Type': 'application/json'},
+                timeout=60
+            )
             response.raise_for_status()
             
             result = response.json()
-            return result.get('response', '')
+            
+            if 'candidates' in result and len(result['candidates']) > 0:
+                if 'content' in result['candidates'][0]:
+                    if 'parts' in result['candidates'][0]['content']:
+                        return result['candidates'][0]['content']['parts'][0]['text']
+            
+            print(f"❌ Unexpected Gemini response format: {result}")
+            return ""
             
         except requests.exceptions.RequestException as e:
-            print(f"❌ Ollama request error: {e}")
-            raise Exception(f"Failed to connect to Ollama: {e}")
+            print(f"❌ Gemini request error: {e}")
+            raise Exception(f"Failed to connect to Gemini AI: {e}")
         except Exception as e:
-            print(f"❌ Ollama error: {e}")
-            raise Exception(f"Ollama generation failed: {e}")
+            print(f"❌ Gemini error: {e}")
+            raise Exception(f"Gemini generation failed: {e}")
 
 class ContentGeneratorAgent:
+    """AI Agent for generating educational content using Gemini AI"""
+    
     def __init__(self):
-        self.llm = OllamaClient()
+        self.gemini = GeminiClient()
+        self.agent_name = "ContentGenerator"
+        self.system_context = """You are an expert educational content generator. 
+        Your role is to create high-quality learning materials, quizzes, and analyze learning patterns."""
         
     def generate_quiz_questions(self, topic: str, difficulty: int, count: int = 5) -> List[QuizQuestion]:
-        """Generate quiz questions using Ollama Llama2 - no fallbacks"""
+        """Generate quiz questions using Gemini AI"""
         
         max_retries = 3
         retry_count = 0
         
         while retry_count < max_retries:
             try:
-                print(f"🦙 Generating {count} questions for topic: {topic}, difficulty: {difficulty}/5 (attempt {retry_count + 1})")
+                print(f"🤖 Generating {count} questions for topic: {topic}, difficulty: {difficulty}/5 (attempt {retry_count + 1})")
                 
-                prompt = f"""You are an expert educator creating multiple choice quiz questions.
+                prompt = f"""{self.system_context}
 
 TASK: Create exactly {count} multiple choice questions about {topic} at difficulty level {difficulty} out of 5.
 
 REQUIREMENTS:
-- Each question must have exactly 4 options labeled A, B, C, D
+- Each question must have exactly 4 options
 - Difficulty level {difficulty}/5 where 1=beginner, 5=expert
 - Focus specifically on {topic}
 - Return ONLY valid JSON format
+- Make questions educational and accurate
+- Ensure one correct answer per question
 
 FORMAT (return exactly this structure):
 [
   {{
     "question": "What is the main concept of {topic}?",
-    "options": ["Option A", "Option B", "Option C", "Option D"],
-    "correct_answer": "Option A",
+    "options": ["Correct Answer", "Wrong Option 1", "Wrong Option 2", "Wrong Option 3"],
+    "correct_answer": "Correct Answer",
     "topic": "{topic}"
   }}
 ]
 
-Create {count} questions about {topic} now. Return only the JSON array:"""
+Create {count} questions about {topic} now. Return only the JSON array without any additional text or formatting:"""
                 
-                print(f"📤 Sending prompt to Ollama...")
-                response_text = self.llm.generate(prompt)
+                response_text = self.gemini.generate(prompt, max_tokens=2048)
                 
                 if not response_text:
-                    raise Exception("Empty response from Ollama")
+                    raise Exception("Empty response from Gemini AI")
                 
-                print(f"📥 Raw Ollama response: {response_text[:300]}...")
+                print(f"📥 Raw Gemini response: {response_text[:300]}...")
                 
                 # Clean the response
                 response_text = self._clean_json_response(response_text)
@@ -209,11 +244,15 @@ Create {count} questions about {topic} now. Return only the JSON array:"""
                 time.sleep(2)
         
         # If all retries failed, generate simple questions
-        print("⚠️ Ollama failed, generating basic questions")
+        print("⚠️ Gemini AI failed, generating basic questions")
         return self._generate_basic_questions(topic, difficulty, count)
     
     def _clean_json_response(self, response_text: str) -> str:
-        """Clean the Ollama response to extract valid JSON"""
+        """Clean the Gemini response to extract valid JSON"""
+        
+        # Remove markdown code blocks if present
+        response_text = re.sub(r'```json\s*', '', response_text)
+        response_text = re.sub(r'```\s*', '', response_text)
         
         # Find JSON array boundaries
         start_idx = response_text.find('[')
@@ -253,7 +292,7 @@ Create {count} questions about {topic} now. Return only the JSON array:"""
         return json_content
     
     def _generate_basic_questions(self, topic: str, difficulty: int, count: int) -> List[QuizQuestion]:
-        """Generate basic questions when Ollama fails"""
+        """Generate basic questions when Gemini AI fails"""
         questions = []
         
         question_templates = {
@@ -261,16 +300,29 @@ Create {count} questions about {topic} now. Return only the JSON array:"""
                 ("What is a variable in algebra?", ["A letter representing an unknown", "A constant number", "An operation", "A graph"]),
                 ("How do you solve x + 5 = 10?", ["Subtract 5 from both sides", "Add 5 to both sides", "Multiply by 5", "Divide by 5"]),
                 ("What is a linear equation?", ["An equation with degree 1", "An equation with degree 2", "A curved line", "A circle"]),
+                ("What does 'like terms' mean?", ["Terms with same variables and powers", "Any two numbers", "Equal signs", "Multiplication terms"]),
+                ("What is the order of operations?", ["PEMDAS/BODMAS", "Left to right always", "Addition first", "Random order"]),
             ],
             'calculus': [
                 ("What is a limit?", ["Value a function approaches", "Maximum value", "Minimum value", "Average value"]),
                 ("What is a derivative?", ["Rate of change", "Area under curve", "Maximum point", "Minimum point"]),
                 ("What is integration?", ["Finding area under curve", "Finding slope", "Finding maximum", "Finding minimum"]),
+                ("What does continuity mean?", ["No breaks in function", "Always increasing", "Always positive", "Has a maximum"]),
+                ("What is the fundamental theorem?", ["Links derivatives and integrals", "States all functions continuous", "Proves limits exist", "Shows functions are smooth"]),
             ],
             'geometry': [
                 ("Sum of angles in a triangle?", ["180 degrees", "360 degrees", "90 degrees", "270 degrees"]),
                 ("Area of a rectangle?", ["length × width", "2(length + width)", "length + width", "length²"]),
                 ("What is a right angle?", ["90 degrees", "180 degrees", "45 degrees", "60 degrees"]),
+                ("What is the Pythagorean theorem?", ["a² + b² = c²", "a + b = c", "a × b = c", "a² = b² + c²"]),
+                ("How many sides does a hexagon have?", ["6", "5", "7", "8"]),
+            ],
+            'trigonometry': [
+                ("What is sine in a right triangle?", ["opposite/hypotenuse", "adjacent/hypotenuse", "opposite/adjacent", "hypotenuse/opposite"]),
+                ("What is cosine in a right triangle?", ["adjacent/hypotenuse", "opposite/hypotenuse", "opposite/adjacent", "hypotenuse/adjacent"]),
+                ("What is tangent in a right triangle?", ["opposite/adjacent", "adjacent/opposite", "opposite/hypotenuse", "adjacent/hypotenuse"]),
+                ("What is the unit circle?", ["Circle with radius 1", "Circle with radius 2", "Any circle", "Circle with diameter 1"]),
+                ("What is the period of sin(x)?", ["2π", "π", "π/2", "4π"]),
             ]
         }
         
@@ -307,21 +359,68 @@ Create {count} questions about {topic} now. Return only the JSON array:"""
         return questions[:count]
     
     def analyze_weak_areas(self, quiz_results: List[Dict]) -> List[str]:
-        """Analyze quiz results to identify weak areas"""
-        incorrect_topics = []
-        for result in quiz_results:
-            if not result.get('is_correct', False):
-                topic = result.get('topic', '').lower()
-                if topic:
-                    incorrect_topics.append(topic)
-        return list(set(incorrect_topics))
+        """Analyze quiz results to identify weak areas using Gemini AI"""
+        try:
+            if not quiz_results:
+                return []
+            
+            prompt = f"""{self.system_context}
+
+TASK: Analyze quiz results and identify weak learning areas.
+
+Quiz Results:
+{json.dumps(quiz_results, indent=2)}
+
+Based on incorrect answers and topics, identify the main weak areas that need attention.
+Return only a JSON array of weak area topics (maximum 5 topics).
+
+Example format: ["algebra", "geometry", "calculus"]
+
+Return only the JSON array without any additional text:"""
+            
+            response = self.gemini.generate(prompt, max_tokens=500)
+            
+            # Try to extract JSON array
+            try:
+                start = response.find('[')
+                end = response.rfind(']')
+                if start != -1 and end != -1:
+                    weak_areas = json.loads(response[start:end+1])
+                    return weak_areas if isinstance(weak_areas, list) else []
+            except:
+                pass
+            
+            # Fallback to simple analysis
+            incorrect_topics = []
+            for result in quiz_results:
+                if not result.get('is_correct', False):
+                    topic = result.get('topic', '').lower()
+                    if topic:
+                        incorrect_topics.append(topic)
+            return list(set(incorrect_topics))
+            
+        except Exception as e:
+            print(f"❌ Error analyzing weak areas: {e}")
+            # Fallback analysis
+            incorrect_topics = []
+            for result in quiz_results:
+                if not result.get('is_correct', False):
+                    topic = result.get('topic', '').lower()
+                    if topic:
+                        incorrect_topics.append(topic)
+            return list(set(incorrect_topics))
 
 class PathGeneratorAgent:
+    """AI Agent for generating personalized learning paths using Gemini AI"""
+    
     def __init__(self):
-        self.llm = OllamaClient()
+        self.gemini = GeminiClient()
+        self.agent_name = "PathGenerator"
+        self.system_context = """You are an AI learning path optimization specialist. 
+        Your role is to create optimal learning sequences based on learner profiles and available resources."""
         
     def generate_learning_path(self, learner_profile: LearnerProfile, available_resources: List[LearningResource]) -> List[str]:
-        """Generate personalized learning path using Ollama"""
+        """Generate personalized learning path using Gemini AI"""
         
         print(f"🛤️ Generating learning path for learner: {learner_profile.name}")
         print(f"Learning style: {learner_profile.learning_style}")
@@ -334,12 +433,14 @@ class PathGeneratorAgent:
             raise Exception("No learning resources available")
         
         try:
-            # Use Ollama to generate learning path
+            # Use Gemini AI to generate learning path
             resource_list = []
             for resource in available_resources:
-                resource_list.append(f"ID: {resource.id}, Title: {resource.title}, Topic: {resource.topic}, Difficulty: {resource.difficulty_level}, Style: {resource.learning_style}")
+                resource_list.append(f"ID: {resource.id}, Title: {resource.title}, Topic: {resource.topic}, Difficulty: {resource.difficulty_level}, Style: {resource.learning_style}, Type: {resource.type}")
             
-            prompt = f"""You are an AI tutor creating a personalized learning path.
+            prompt = f"""{self.system_context}
+
+TASK: Create an optimal learning sequence for this learner.
 
 LEARNER PROFILE:
 - Name: {learner_profile.name}
@@ -351,38 +452,44 @@ LEARNER PROFILE:
 AVAILABLE RESOURCES:
 {chr(10).join(resource_list)}
 
-TASK: Select 6-8 resource IDs in optimal learning order.
-
-PRIORITY:
-1. Match learning style: {learner_profile.learning_style}
+OPTIMIZATION CRITERIA:
+1. Prioritize learning style: {learner_profile.learning_style}
 2. Focus on weak areas: {learner_profile.weak_areas}
-3. Start with difficulty level {learner_profile.knowledge_level}
-4. Progress logically
+3. Start with difficulty level {learner_profile.knowledge_level} or lower
+4. Progress logically through prerequisites
+5. Ensure smooth difficulty progression
+6. Select 6-8 resources maximum
 
-Return only resource IDs as JSON array:
-["id1", "id2", "id3", ...]"""
+Return only a JSON array of resource IDs in optimal learning order:
+["resource_id_1", "resource_id_2", "resource_id_3"]
+
+Return only the JSON array without any additional text:"""
             
-            print("🦙 Asking Ollama to generate learning path...")
-            response = self.llm.generate(prompt)
+            print("🤖 Asking Gemini AI to generate learning path...")
+            response = self.gemini.generate(prompt, max_tokens=1000)
             
             # Try to extract JSON from response
             json_match = re.search(r'\[.*?\]', response, re.DOTALL)
             if json_match:
-                path_ids = json.loads(json_match.group())
-                
-                # Validate resource IDs
-                valid_ids = [r.id for r in available_resources]
-                filtered_path = [rid for rid in path_ids if rid in valid_ids]
-                
-                if filtered_path:
-                    print(f"✅ Generated AI learning path: {filtered_path}")
-                    return filtered_path
+                try:
+                    path_ids = json.loads(json_match.group())
+                    
+                    # Validate resource IDs
+                    valid_ids = [r.id for r in available_resources]
+                    filtered_path = [rid for rid in path_ids if rid in valid_ids]
+                    
+                    if filtered_path and len(filtered_path) >= 3:
+                        print(f"✅ Generated AI learning path: {filtered_path}")
+                        return filtered_path
+                except json.JSONDecodeError:
+                    pass
             
             # Fallback to manual generation
+            print("⚠️ AI path generation failed, using manual approach")
             return self._manual_path_generation(learner_profile, available_resources)
             
         except Exception as e:
-            print(f"❌ Error with Ollama path generation: {e}")
+            print(f"❌ Error with Gemini path generation: {e}")
             return self._manual_path_generation(learner_profile, available_resources)
     
     def _manual_path_generation(self, learner_profile: LearnerProfile, available_resources: List[LearningResource]) -> List[str]:
@@ -423,31 +530,42 @@ Return only resource IDs as JSON array:
         return path[:8]
 
 class EvaluatorAgent:
+    """AI Agent for evaluating quiz responses and providing feedback using Gemini AI"""
+    
     def __init__(self):
-        self.llm = OllamaClient()
+        self.gemini = GeminiClient()
+        self.agent_name = "QuizEvaluator"
+        self.system_context = """You are an educational assessment expert. 
+        Your role is to evaluate quiz responses and provide constructive, encouraging feedback."""
     
     def evaluate_quiz_response(self, question: QuizQuestion, user_answer: str) -> Dict[str, Any]:
-        """Evaluate quiz response using Ollama"""
+        """Evaluate quiz response using Gemini AI"""
         
         is_correct = user_answer.strip().lower() == question.correct_answer.strip().lower()
         
         try:
-            prompt = f"""Provide educational feedback for this quiz question.
+            prompt = f"""{self.system_context}
+
+TASK: Provide educational feedback for this quiz question.
 
 QUESTION: {question.question}
+OPTIONS: {', '.join(question.options)}
 CORRECT ANSWER: {question.correct_answer}
 USER ANSWER: {user_answer}
 RESULT: {'CORRECT' if is_correct else 'INCORRECT'}
 
-Write helpful feedback (2-3 sentences) that explains why the answer is correct/incorrect and provides a learning tip.
+Write helpful, encouraging feedback (2-3 sentences) that:
+1. Explains why the answer is correct/incorrect
+2. Provides a learning tip or concept explanation
+3. Encourages continued learning
 
-Feedback:"""
+Keep the tone positive and educational. Return only the feedback text without any additional formatting:"""
             
-            response = self.llm.generate(prompt, max_tokens=200)
+            response = self.gemini.generate(prompt, max_tokens=300)
             feedback = response.strip() if response else f"Your answer is {'correct' if is_correct else 'incorrect'}."
             
         except Exception as e:
-            print(f"Error generating feedback: {e}")
+            print(f"❌ Error generating feedback: {e}")
             feedback = f"Your answer is {'correct' if is_correct else 'incorrect'}. The correct answer is {question.correct_answer}."
         
         return {
@@ -458,7 +576,7 @@ Feedback:"""
         }
     
     def generate_overall_feedback(self, quiz_results: List[Dict]) -> Dict[str, Any]:
-        """Generate overall feedback for quiz performance"""
+        """Generate overall feedback for quiz performance using Gemini AI"""
         if not quiz_results:
             return {
                 'average_score': 0,
@@ -476,23 +594,30 @@ Feedback:"""
         strong_topics = [r['topic'] for r in quiz_results if r.get('is_correct', False)]
         
         try:
-            prompt = f"""Based on quiz performance, provide a brief recommendation.
+            prompt = f"""{self.system_context}
 
-PERFORMANCE:
+TASK: Provide an encouraging recommendation based on quiz performance.
+
+PERFORMANCE DATA:
 - Score: {average_score:.1f}%
 - Correct: {len(strong_topics)}/{len(quiz_results)}
 - Strong areas: {list(set(strong_topics))}
-- Weak areas: {list(set(weak_topics))}
+- Areas to improve: {list(set(weak_topics))}
 
-Write an encouraging 1-2 sentence recommendation:"""
+Write an encouraging 1-2 sentence recommendation that:
+1. Acknowledges their effort
+2. Provides specific guidance for improvement
+3. Motivates continued learning
+
+Return only the recommendation text without any additional formatting:"""
             
-            response = self.llm.generate(prompt, max_tokens=100)
+            response = self.gemini.generate(prompt, max_tokens=200)
             recommendation = response.strip() if response else (
                 'Great job! Keep up the good work!' if average_score >= 70 else 'Keep practicing to improve your understanding!'
             )
             
         except Exception as e:
-            print(f"Error generating recommendation: {e}")
+            print(f"❌ Error generating recommendation: {e}")
             recommendation = 'Great job! Keep up the good work!' if average_score >= 70 else 'Keep practicing to improve!'
         
         return {
@@ -505,10 +630,13 @@ Write an encouraging 1-2 sentence recommendation:"""
         }
 
 class AgentOrchestrator:
+    """Orchestrates all AI agents for coordinated learning experience"""
+    
     def __init__(self):
         self.content_agent = ContentGeneratorAgent()
         self.path_agent = PathGeneratorAgent()
         self.evaluator_agent = EvaluatorAgent()
+        print("✅ Initialized AI Agent Orchestrator with Gemini AI")
     
     def process_new_learner(self, profile_data: Dict) -> Dict[str, Any]:
         # Ensure knowledge_level is an integer
@@ -573,28 +701,31 @@ class AgentOrchestrator:
 
 orchestrator = AgentOrchestrator()
 
-# Test Ollama connection on startup
-def test_ollama_connection():
+# Test Gemini connection on startup
+def test_gemini_connection():
     try:
-        ollama = OllamaClient()
-        response = ollama.generate("Test prompt", max_tokens=10)
-        print(f"✅ Ollama connection successful")
+        if not GEMINI_API_KEY:
+            print("❌ Gemini API key not configured")
+            return False
+            
+        gemini = GeminiClient()
+        response = gemini.generate("Test prompt: Say hello", max_tokens=10)
+        print(f"✅ Gemini AI connection successful")
         return True
     except Exception as e:
-        print(f"❌ Ollama connection failed: {e}")
-        print("Make sure Ollama is running: ollama serve")
-        print(f"And model is available: ollama pull {OLLAMA_MODEL}")
+        print(f"❌ Gemini AI connection failed: {e}")
+        print("Make sure your GEMINI_API_KEY is correctly set in .env file")
         return False
 
-# Flask routes (same as before)
+# Flask routes
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    ollama_status = test_ollama_connection()
+    gemini_status = test_gemini_connection()
     return jsonify({
         'status': 'healthy', 
         'timestamp': datetime.utcnow().isoformat(),
-        'ollama_connected': ollama_status,
-        'ollama_model': OLLAMA_MODEL
+        'gemini_connected': gemini_status,
+        'ai_model': 'gemini-2.0-flash-exp'
     })
 
 @app.route('/api/learner/create', methods=['POST'])
@@ -635,30 +766,10 @@ def conduct_pretest(learner_id):
             'success': True,
             'pretest_id': pretest['id'],
             'questions': [{'id': q.id, 'question': q.question, 'options': q.options} for q in questions]
-        })
+       })
     except Exception as e:
-        print(f"❌ Error conducting pretest: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/admin/learners', methods=['GET'])
-def get_all_learners():
-    try:
-        learners = list(db.learner_profiles.find({}, {'_id': 0}))
-        
-        # Sort by creation date (newest first)
-        learners.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-        
-        print(f"📋 Retrieved {len(learners)} learners for admin")
-        
-        return jsonify({
-            'success': True,
-            'learners': learners,
-            'total': len(learners)
-        })
-    except Exception as e:
-        print(f"❌ Error getting learners: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+       print(f"❌ Error conducting pretest: {e}")
+       return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/pretest/<pretest_id>/submit', methods=['POST'])
 def submit_pretest(pretest_id):
@@ -879,6 +990,25 @@ def get_learner_progress(learner_id):
        print(f"❌ Error getting learner progress: {e}")
        return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/admin/learners', methods=['GET'])
+def get_all_learners():
+   try:
+       learners = list(db.learner_profiles.find({}, {'_id': 0}))
+       
+       # Sort by creation date (newest first)
+       learners.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+       
+       print(f"📋 Retrieved {len(learners)} learners for admin")
+       
+       return jsonify({
+           'success': True,
+           'learners': learners,
+           'total': len(learners)
+       })
+   except Exception as e:
+       print(f"❌ Error getting learners: {e}")
+       return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/analytics/dashboard', methods=['GET'])
 def get_analytics_dashboard():
    try:
@@ -922,13 +1052,34 @@ def get_analytics_dashboard():
        print(f"❌ Error getting analytics: {e}")
        return jsonify({'success': False, 'error': str(e)}), 500
 
+# AI Test endpoint
+@app.route('/api/ai/test', methods=['POST'])
+def test_ai():
+   try:
+       data = request.get_json()
+       prompt = data.get('prompt', 'Hello, how are you?')
+       
+       gemini = GeminiClient()
+       response = gemini.generate(prompt, max_tokens=500)
+       
+       return jsonify({
+           'success': True,
+           'prompt': prompt,
+           'response': response,
+           'model': 'gemini-2.0-flash-exp'
+       })
+   except Exception as e:
+       print(f"❌ Error testing AI: {e}")
+       return jsonify({'success': False, 'error': str(e)}), 500
+
 if __name__ == '__main__':
-   print("🦙 Starting Personalized Tutor API with Ollama Llama2")
+   print("🤖 Starting Personalized Tutor API with Gemini AI")
    
-   # Test Ollama connection
-   if test_ollama_connection():
+   # Test Gemini connection
+   if test_gemini_connection():
        print("✅ Ready to serve requests!")
    else:
-       print("⚠️ Ollama connection issues detected, but server will start anyway")
+       print("⚠️ Gemini AI connection issues detected, but server will start anyway")
+       print("Make sure to set GEMINI_API_KEY in your .env file")
    
    app.run(debug=True, host='0.0.0.0', port=5000)
