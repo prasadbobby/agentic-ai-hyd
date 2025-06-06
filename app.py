@@ -110,7 +110,7 @@ class GeminiClient:
                 url, 
                 json=payload, 
                 headers={'Content-Type': 'application/json'},
-                timeout=60
+                verify=False
             )
             response.raise_for_status()
             
