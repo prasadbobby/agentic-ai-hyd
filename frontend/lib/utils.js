@@ -11,19 +11,19 @@ export const formatDate = (dateString) => {
 };
 
 export const getScoreColor = (score) => {
-  if (score >= 80) return 'text-green-600 bg-green-50';
-  if (score >= 60) return 'text-yellow-600 bg-yellow-50';
-  return 'text-red-600 bg-red-50';
+  if (score >= 80) return 'bg-green-100 text-green-700 border-green-200';
+  if (score >= 60) return 'bg-yellow-100 text-yellow-700 border-yellow-200';
+  return 'bg-red-100 text-red-700 border-red-200';
 };
 
-export const getLearningStyleIcon = (style) => {
-  const icons = {
-    visual: '👁️',
-    auditory: '👂',
-    reading: '📚',
-    kinesthetic: '🤲'
+export const getLearningStyleName = (style) => {
+  const styles = {
+    visual: 'Visual',
+    auditory: 'Auditory',
+    reading: 'Reading/Writing',
+    kinesthetic: 'Kinesthetic'
   };
-  return icons[style] || '🎯';
+  return styles[style] || 'Universal';
 };
 
 export const validateEmail = (email) => {

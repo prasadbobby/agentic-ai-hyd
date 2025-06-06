@@ -79,6 +79,11 @@ export const apiClient = {
    return response.data;
  },
 
+getAllLearners: async () => {
+    const response = await api.get('/api/admin/learners');
+    return response.data;
+  },
+
  // Progress
  getLearnerProgress: async (learnerId) => {
    const response = await api.get(`/api/learner/${learnerId}/progress`);
